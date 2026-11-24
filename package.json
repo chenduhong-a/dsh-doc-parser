@@ -1,7 +1,7 @@
 {
   "name": "dsh-doc-parser",
   "version": "0.3.6",
-  "author": "ZQY · LD-3F004438-01D5",
+  "author": "ZQY-LD",
   "description": "通用文档解析工具：PDF 与 Office（docx/pptx/xlsx）的体检、文本、渲染、OCR、表格与整份解析（MinerU 本地 GPU、mineru.net 在线）。",
   "type": "module",
   "main": "lib/main.js",
