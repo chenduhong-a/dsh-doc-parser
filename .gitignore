@@ -1,0 +1,6 @@
+# 依赖：可重装
+node_modules/
+
+# 运行时产物
+*.log
+.dsh-cache/

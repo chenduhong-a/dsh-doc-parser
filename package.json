@@ -1,0 +1,34 @@
+{
+  "name": "dsh-doc-parser",
+  "version": "0.3.6",
+  "author": "ZQY · LD-BA49BC34-894F",
+  "description": "通用文档解析工具：PDF 与 Office（docx/pptx/xlsx）的体检、文本、渲染、OCR、表格与整份解析（MinerU 本地 GPU、mineru.net 在线）。",
+  "type": "module",
+  "main": "lib/main.js",
+  "exports": {
+    ".": "./lib/main.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "1.0.9",
+    "pdfjs-dist": "6.3.289"
+  },
+  "license": "MIT",
+  "private": true
+}

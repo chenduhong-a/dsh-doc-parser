@@ -1,0 +1,4 @@
+# dsh-doc-parser bundle patch: insert the local document toolkit into the profile roster.
+- insert:
+    - id: pdf-enhanced
+      name: dsh-doc-parser
