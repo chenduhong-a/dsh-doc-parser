@@ -72,7 +72,7 @@ mineru-models-download --tier basic --small-backend onnx --source modelscope
 
 四档的权威定义在 `mineru4-venv\Lib\site-packages\mineru\types.py`（`Tier` 字面量、`QUALITY_TIERS`、`DEPLOYMENT_TIERS`）；`advanced` 与 `standard` 用同一套模型，`mineru-kit models download --tier advanced` 会被拒，不必下第二份。有 GPU 时四档全开（`tier_recommendation.py` 的 `tiers_for_hardware`）。
 
-### 两个开关文件（都是「文件优先、环境变量兜底」，每次调用重读）
+### 两个开关文件（文件优先、环境变量兜底）
 
 | 文件 | 内容 | 兜底 |
 |---|---|---|
@@ -80,6 +80,8 @@ mineru-models-download --tier basic --small-backend onnx --source modelscope
 | `mineru-mode.txt` | `local` / `online` | `MINERU_MODE` → 未设时自动（本地 venv 在就在本地） |
 
 两个文件都放在插件根目录（`MINERU_TIER_FILE` / `MINERU_MODE_FILE` 可改路径），**改完下一次调用就生效，不必重启宿主**——这正是加文件的原因：Windows 改用户级环境变量只写注册表、不刷新已运行的 explorer，宿主重启后继承的仍是旧快照（2026-11-25 踩过，差一步把 PDF 又传上去）。
+
+**作用域不同，别记混**：`mineru-tier.txt` 在**每次发 MinerU 请求时**读（`doc_ocr` / `doc_tables` 走 OCR 时）；`mineru-mode.txt` 只在**真的要决定走本地还是在线**时才读——**有文本层的 PDF 根本不进这条路径**（`doc_text` 与 `doc_tables` 的文本层启发式都直接走 PDFium），所以把 `mineru-mode.txt` 写成非法值、去跑一份 `doc_info` 报 `scanned pages: none` 的 PDF，照样能出结果。**隐私开关管的是扫描件与图片型 PDF**，2026-11-26 实测确认。
 
 **两个都是 fail-closed**：文件存在但值不认识（含空文件）直接报错，不再回落环境变量。`mineru-mode.txt` 是隐私开关，回落就可能把 PDF 传上 mineru.net，所以宁可报错。
 
@@ -175,7 +177,7 @@ mineru-models-download --tier basic --small-backend onnx --source modelscope
 
 **怎么开**（两个来源，文件优先）：
 
-- 插件根目录的 `mineru-mode.txt` 写 `local` 或 `online`（一行）。**每次调用重读，改完下一次 `doc_ocr` 即生效，不用重启宿主。**
+- 插件根目录的 `mineru-mode.txt` 写 `local` 或 `online`（一行）。**每次要走 MinerU 时重读，改完下一次 `doc_ocr` 即生效，不用重启宿主**；但**有文本层的 PDF 不进这条路径**（PDFium 直接取字），见上面「作用域不同」那段。
 - 没有那个文件时看 `MINERU_MODE` 环境变量：`online` 强制在线、`local` 强制本地、不设则本地 venv 在就走本地、不在且有 token 才走在线。
 
 2026-11-25 加文件这一层，是因为 Windows 改用户级环境变量只写注册表、**不刷新已运行的 explorer**，宿主重启后继承的仍是旧快照——当天 23:15 把 `MINERU_MODE` 改成 `local`、23:19 重启宿主，进程里读到的还是 `online`，差一步又把 PDF 传了上去。
@@ -351,5 +353,7 @@ dsh plugin --profile desktop remove dsh-doc-parser
 - `doc_ocr` 文字层拼接会丢页间空格（BT-OCR-06）；
 - `prefetch_book.mjs` 是手动脚本，插件内没有入口，直接跑会因缺参崩；
 - `loadPdf` 的 6 处不 `destroy`（2026-11-22 审计遗留，要重构 6 个工具的执行结构）。
+
+**0.3.15（重启后实测顺手补的两处）**：①`doc_tables` 的页头原先一律写 `HTML table`，但 4.x 本地通道给的是 Markdown 表、只有在线通道给 HTML——现在按内容判（`<table>` 才算 HTML）；②补上 `mineru-mode.txt` 的**作用域**说明（见上文「作用域不同」），这是实测发现的：把文件写成 `bogus-value` 后跑一份有文本层的 PDF，`doc_ocr` 照样正常出结果，因为那条路径根本不读 mode。
 
 **验证**：每次改动都跑 `ELECTRON_RUN_AS_NODE=1 <Harness.exe> --check <file>`（exit 0、stderr 空）；0.3.11 之后在真实 `doc_ocr` 上验过 p193（227 字表格）与 p222（330 字三表 + figure 块）——这两页在 `standard` 下是空 `chart` 块，能出字说明 advanced 补跑在插件路径上真的生效了，且 `p193.json` 的 `tier` 字段为 `advanced`。
