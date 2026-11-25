@@ -44,7 +44,7 @@ hash-index.json               # 路径+大小+mtime → sha256 的索引（大�
   - ~~Indra~~ 已于 2026-11-18 移除（见文末第十四轮）；旧缓存里 `engine=indra` 的记录仍可读，但不再产生新记录；
   - **RapidOCR 已于 2026-10-24 移除**（用户拍板）；`engine` 参数现在只剩 `mineru` 一个合法值。
 - OCR 结果按页缓存在 `<data>\<hash>\ocr\pNNN.json`（含 `engine` 字段；切换引擎会重识别），跨会话共享（`$DSH_HOME\storages\pdf-reader`），命中即跳过识别。
-- 渲染比例固定 1.5 倍：与 2.5 倍精度持平（封面 99.2 vs 99.1），速度快约 3 倍。
+- 渲染默认 **2.5 倍**（`scale` 参数可调；工具描述与代码都是 2.5）。1.5 倍是 2026-11-09 的旧默认，当时测「与 2.5 倍精度持平（封面 99.2 vs 99.1）、快约 3 倍」，但那只是封面样本，正文小字号会糊，已改回 2.5。
 - MinerU 的 venv 另装（4.x 基础版不带 torch，走 `onnxruntime-directml`，GPU 直接可用）：
 
 ```sh
@@ -56,6 +56,50 @@ mineru-models-download --tier basic --small-backend onnx --source modelscope
 - **注意（2026-11-09 已修正的旧结论）**：`onnxruntime 1.31` 曾在本机 Python 3.12 上 `0xC0000005` 崩溃——根因是**系统 VC 运行时被旧程序覆盖**（`System32\vcruntime140.dll`、`msvcp140.dll` 停在 14.00.24215.1，而 redist 装的是 14.51.36247），用 Package Cache 里的原包跑 `VC_redist.x64.exe /repair /quiet /norestart` 修好后，1.31 已可正常 import。这条只对已移除的 Indra 通道有意义，留作历史记录。
 - 工具用原生对象 + `ctx.tools.register`，不依赖 `@deepseek-ai/dsh-tools`。
 - **扫描件渲染回退**：pdfjs 缺 CCITT/JBIG2 解码器，会把这类页面渲染成纯白图；`pdf_render_page` 渲染后检测纯白（非白像素 <0.1%），自动改用 **PDFium（`pypdfium2`）** 重渲（`lib/render_pdfium.py`），`pdf_ocr_page` 复用同一结果。兜底解释器现在只用 MinerU 的 venv（它自带 `pypdfium2`），插件不再自带 venv。
+
+## 档位、模式与阈值（2026-11-26 补）
+
+这一节是 4.x 之后最容易踩的地方，之前 README 一个字都没写（缺陷测试 D1 报的就是这条）。
+
+### MinerU 的四档
+
+| 档 | 模型 | effort | 单页成本（50 页整批实测） | 用途 |
+|---|---|---|---|---|
+| `flash` | 不加载模型 | `flash` | 未测 | 只要文本层，不做识别 |
+| `basic` | `MinerU-4_models_onnx` | `medium` | **1.8 秒/页**（旧） | 最快，但简繁混、漏括号、串行丢字 |
+| `standard` | onnx + `MinerU2.5-Pro-1.2B-GGUF` | `high` | **1.16 秒/页** | 默认档，印刷体与手写板书都明显优于 basic |
+| `advanced` | 同上（不另下载） | `xhigh` | **2.13 秒/页** | 只在整页图/图表页上多出图注与图内文字 |
+
+四档的权威定义在 `mineru4-venv\Lib\site-packages\mineru\types.py`（`Tier` 字面量、`QUALITY_TIERS`、`DEPLOYMENT_TIERS`）；`advanced` 与 `standard` 用同一套模型，`mineru-kit models download --tier advanced` 会被拒，不必下第二份。有 GPU 时四档全开（`tier_recommendation.py` 的 `tiers_for_hardware`）。
+
+### 两个开关文件（都是「文件优先、环境变量兜底」，每次调用重读）
+
+| 文件 | 内容 | 兜底 |
+|---|---|---|
+| `mineru-tier.txt` | `flash` / `basic` / `standard` / `advanced` | `MINERU_TIER` → 默认 `standard` |
+| `mineru-mode.txt` | `local` / `online` | `MINERU_MODE` → 未设时自动（本地 venv 在就在本地） |
+
+两个文件都放在插件根目录（`MINERU_TIER_FILE` / `MINERU_MODE_FILE` 可改路径），**改完下一次调用就生效，不必重启宿主**——这正是加文件的原因：Windows 改用户级环境变量只写注册表、不刷新已运行的 explorer，宿主重启后继承的仍是旧快照（2026-11-25 踩过，差一步把 PDF 又传上去）。
+
+**两个都是 fail-closed**：文件存在但值不认识（含空文件）直接报错，不再回落环境变量。`mineru-mode.txt` 是隐私开关，回落就可能把 PDF 传上 mineru.net，所以宁可报错。
+
+### `MINERU_HTTP_MAX_MB`（默认 200 MiB）
+
+这是**内存**闸门，不是「值不值得走 HTTP」的判据：`/v1/file_parse` 的 multipart 要把整本文件读进内存，所以按**整本体积**判，与「这次要解析几页」无关。2026-11-26 从 120 提到 200——500 页以上的图片型整本（如 510 页 116 MiB 的课件）要能一次过。
+
+### 按页自动分档（0.3.8 起）
+
+主档跑完后，对「只有图、没有真文字」的页自动用 `advanced` 补跑一次：
+
+- 候选判定：该页所有块都是 `page_number`/`header`/`footer`/`image`/`figure`/空 chart（或零块）；
+- 「真文字」口径：Markdown 图片链接 `![…](…)` 与 `[figure …]` / `[chart …]` 占位符都不算，`image`/`figure` 块的 VLM 描述也不算；
+- 补跑日志：`[mineru] auto-tier: N no-text page(s) of M get an advanced pass (p…)`，升级成功再打 `[mineru] auto-tier: N page(s) upgraded to advanced`；
+- 某一段补跑失败只打一行原因、保留主档结果，不会让整批失败；
+- 关掉：环境变量 `MINERU_AUTO_TIER=0`（**没有**工具参数入口，`autoTier:false` 只对代码内调用有效）。
+
+### 页缓存与 tier
+
+页缓存写在 `$DSH_HOME\storages\pdf-reader\<hash>\ocr\pNNN.json`，`tier` 字段只记「这页哪个档解析的」（排查用），**不在命中判据里**。已知限制：跑过一次 `standard` 之后，同一页再调用会直接命中缓存、不会因为「这页其实是图页」而升级——要升级得带 `force:true`。
 
 ## 2026-11-09 第二轮优化（D/E/F 组）
 
@@ -70,7 +114,7 @@ mineru-models-download --tier basic --small-backend onnx --source modelscope
 - **F1 整本找表有闸**：`pdf_tables` 的 `maxMineruPages`（默认 24）超出的页标 `skipped`，不再悄悄把整本扫描书送进 OCR。
 - **F2 续表标注**：相邻两页 HTML 表首行相同 → 后一页标 `[continues table from pN]`（只标注不合并，避免拼错）。
 - **F3 图片一次导出**：`pdf_ocr_page exportImages=true` 把本次页缓存里的图统一拷到 `<cache>/figures/` 并列出路径。
-- **F4 整本预跑有入口**：`pdf_ocr_page prefetch=true` 后台跑整本、立即返回；同一 PDF 重复调用会提示「已在跑」。
+- **F4 整本预跑有入口**：`doc_ocr prefetch=true` 后台跑整本、立即返回；同一 PDF 重复调用会提示「已在跑」。
 
 ## 2026-11-09 第三轮：独立测试发现的 12 个 BUG
 
@@ -95,7 +139,7 @@ mineru-models-download --tier basic --small-backend onnx --source modelscope
 2. **没导出的图不再写悬空路径**：`withImages=false` 时 markdown 里以前仍写 `![](images/xxx.jpg)`，文件其实不存在，读的人会以为能直接打开。现在写成 `[figure: 图注 — images/xxx.jpg (not extracted; re-run with withImages=true)]`，一眼看出要不要重跑。
 3. **版本号补上**：描述里早就写着 MinerU 3.4.5，`version` 却停在 `0.1.0`。升到 **0.2.0**（三轮优化 + 17 个 BUG 修复 + 本轮输出打磨），以后回滚或分发好认。
 
-`lib/main.js` 1326 行 / SHA256 前缀 `27E7F29654BFF82E`。
+`lib/main.js` 1326 行 / SHA256 前缀 `27E7F29654BFF82E`（**这是 2026-11-09 第四轮当时的快照**；文件此后一直在改，行数与指纹都已不作数——要现成的数字用 `(Get-Content lib\main.js).Count` 与 `certutil -hashfile lib\main.js SHA256`）。
 
 ## 2026-11-11 第五轮：侧栏 OCR 进度条（0.3.0）
 
@@ -207,7 +251,7 @@ pdf-tester 报的 15 个问题里最后四个已经修掉：
 | 编号 | 现象 | 修法 |
 |---|---|---|
 | 轻-1 | 在线单页 OCR 也把整本 `images/` 全量拷进缓存目录 | `relocateImages` 加 `needed` 集合，只搬本次页真正引用的图 |
-| 轻-2 | 旧 `schema` 页缓存被直接复用 | 缓存命中判断加 `rec.schema === PAGE_SCHEMA`（=2） |
+| 轻-2 | 旧 `schema` 页缓存被直接复用 | 缓存命中判断加 `rec.schema == null || rec.schema <= CACHE_SCHEMA`（无 schema 的旧记录仍可读，高于当前 schema 的才拒；常量名是 `CACHE_SCHEMA`，不是 `PAGE_SCHEMA`） |
 | 轻-3 | `doc_text` 对 xlsx 的字符数虚高约 4 倍 | 从「单元格数 ×4」改成把每行单元格真实值拼起来量长度 |
 | 轻-4 | `doc_render` 传 pptx 抛 `Invalid PDF structure` | 先判后缀，直接回「只渲染 PDF，Office 用 doc_text / doc_tables / doc_parse / doc_formulas」 |
 
@@ -258,7 +302,7 @@ dsh plugin --profile desktop remove dsh-doc-parser
 
 ## 目录说明
 
-- `lib/main.js`（1777 行）工具定义与路由；`lib/cache.js` 缓存、哈希索引与 LRU；`lib/pdf-core.js`（199 行）pdfjs 封装与 PDFium 兜底；`lib/tables.js` 坐标表格启发式；`lib/ocr_mineru.py` MinerU 本地通道；`lib/mineru-online.js`（439 行）MinerU 官方在线通道（申请上传 → PUT → 轮询 → 下 zip → content_list 拆页）；`lib/render_pdfium.py`/`lib/text_pdfium.py` PDFium 兜底；`lib/prefetch_book.mjs` 整本预跑脚本（手动用；插件内已有 `pdf_ocr_page prefetch=true` 入口）。
+- `lib/main.js`（约 2200 行，2026-11-26 翻过五档修复后已超 100 KB，拆分成 `mineru-*.js` 是待办）工具定义与路由；`lib/cache.js` 缓存、哈希索引与 LRU；`lib/pdf-core.js`（199 行）pdfjs 封装与 PDFium 兜底；`lib/tables.js` 坐标表格启发式；`lib/ocr_mineru.py` MinerU 本地通道；`lib/mineru-online.js`（439 行）MinerU 官方在线通道（申请上传 → PUT → 轮询 → 下 zip → content_list 拆页）；`lib/render_pdfium.py`/`lib/text_pdfium.py` PDFium 兜底；`lib/prefetch_book.mjs` 整本预跑脚本（手动用；插件内已有 `pdf_ocr_page prefetch=true` 入口）。
 - `test/` 历史调试脚本，已归档到 `test/_archive/`（索引见其 `README.md`），不影响运行。
 - ~~`ocr-venv/`~~ 已于 2026-11-18 删除（362.5 MB，Indra 移除）；PDFium 兜底解释器改用 MinerU 的 venv（`MINERU_VENV` 可覆盖）。
 
@@ -281,7 +325,31 @@ dsh plugin --profile desktop remove dsh-doc-parser
 - **文本层页假置信度**：纯文本页写 `confidence: 100`，页头显示 `(ocr 100%)`，与「MinerU 不返回置信度」的注释矛盾。现在记 `null`，页头显示 `(ocr text)`。
 - **`doc_tables` 超时**：默认最多 24 页送 MinerU，冷启动 40 s + 每页 1.2–7 s 必超 120 s；改成 600000，与 `doc_ocr` 一致。
 - **`MINERU_MODE` 两条静默路径**：显式 `online` 但无 token 会静默走本地；未设 mode、本地 venv 缺失而有 token 会**静默把整份 PDF 上传**。现在两条都打显式提示，`doc_ocr` 描述也写明「设 `MINERU_MODE=local` 可禁止上传」。（2026-11-25 起模式优先取插件根目录的 `mineru-mode.txt`，环境变量降为兜底——原因见第七轮那节。）
-- **本轮另修的中低 30 处**（同批审计，已落盘并验证）：OOXML/TSV 侧 —— xlsx 自闭合单元格 `<c r="A1" s="1"/>` 不再丢格与错列、稀疏数组铺平（`formats/ooxml.js`）、空行保留且裁尾部空行、`sharedStrings` 去掉二次 `decodeXml`、`rowsToTsv` 把单元格内 `\t\n` 压成空格（`tables.js`）、`ooxmlTables` 支持 `pages` 按 sheet 过滤；工具面 —— `doc_parse` 的 20000 改吃 `PDF_MAX_CHARS`、输出头带 `[batch <id> @ <时间>]`、`force` 描述改实话（OCR 阶段不读页缓存）、`/\.pptx?$/` 收紧成 `\.pptx$`、`doc_tables` 增加 `maxRows` 并透传 `pages`、`engine=mineru` 时跳过文本层启发式、`doc_info` 的 `probeLimit` 夹到 2000、删死代码 `apiProbeCache`；语言与缓存 —— `DEFAULT_LANG` 常量统一三处写死值、`cache.js` 命中时加首尾 4 KB 指纹校验（同 size+mtime 的内容替换不再复用旧 hash）；超时与产物 —— 三处 `spawnSync` 补 `timeout`（`main.js` 30 s / `pdf-core.js` 60 s / `mineru-online.js` 120 s，`main.js:361` 的本地 MinerU CLI 原本就有 1800000）、渲染 PNG 名带 scale（`p003@2.5x.png`）。
+- **本轮另修的中低 30 处**（同批审计，已落盘并验证）：OOXML/TSV 侧 —— xlsx 自闭合单元格 `<c r="A1" s="1"/>` 不再丢格与错列、稀疏数组铺平（`formats/ooxml.js`）、空行保留且裁尾部空行、`sharedStrings` 去掉二次 `decodeXml`、`rowsToTsv` 把单元格内 `\t\n` 压成空格（`tables.js`）、`ooxmlTables` 支持 `pages` 按 sheet 过滤；工具面 —— `doc_parse` 的 20000 改吃 `PDF_MAX_CHARS`、输出头带 `[batch <id> @ <时间>]`、`force` 描述改实话（OCR 阶段不读页缓存）、`/\.pptx?$/` 收紧成 `\.pptx$`、`doc_tables` 增加 `maxRows` 并透传 `pages`、`engine=mineru` 时跳过文本层启发式、`doc_info` 的 `probeLimit` 夹到 2000、删死代码 `apiProbeCache`；语言与缓存 —— `DEFAULT_LANG` 常量统一三处写死值、`cache.js` 命中时加首尾 4 KB 指纹校验（同 size+mtime 的内容替换不再复用旧 hash）；超时与产物 —— 三处 `spawnSync` 补 `timeout`（`main.js` 30 s / `pdf-core.js` 60 s / `mineru-online.js` 120 s；本地 MinerU CLI 那个 spawn 原本就有 1800000，行号会漂，搜 `1800000` 即可）、渲染 PNG 名带 scale（`p003@2.5x.png`）。
 - **仍未修的一项**：`loadPdf` 的 6 处不 `destroy`（pdfjs 不释放 worker）。要重构 6 个工具的执行结构才能加 `finally`，而 `prepare()` 返回的 abs 是否内容不可变尚未确认（复用缓存可能拿到陈旧 doc），风险高于收益——留给专门一轮做。完整清单见 `C:\deepseek\work\_audit\docparser-bugs.md`。
 
 验证：三文件 `node --check` 通过；`findSoffice()` 实测返回 `C:\Program Files\LibreOffice\program\soffice.exe`；`slice(0, 4000)` / `confidence: 100` / `timeoutMs: 120000` 残留均为 0。
+
+## 2026-11-26 全量缺陷测试与五档修复（0.3.11 – 0.3.14）
+
+四个并行子代理分片测（pdf / ocr / office / config），合计 **60 条**问题（含跨片重叠），无 P0；两条 P1 都在 OCR 片。原报告在 `C:\deepseek\work\handover\bugtest-{pdf,ocr,office,config}.md`。
+
+**五档全修**：
+
+| 版本 | 档 | 内容 |
+|---|---|---|
+| 0.3.11（`13efd19`） | ①两条「高」 | `withImages` 破坏自动分档（`![` 前缀不匹配占位符正则、`realTextOf` 没跳 image 块）、`doc_tables` 只认 `type==='table'`（改判「块文本里有 Markdown 表」） |
+| 0.3.12（`a8f10df`） | ②fail-closed + ③静默截断 | mode/tier 文件值不认识就报错（不再回落环境变量）；`maxChars` 丢页补分页提示、`doc_info` 大纲记总数并显示「showing 30 of N」、页码越界报错而非钳制 |
+| 0.3.13（`58108c1`） | ④报文与假阴性 | 4.x 闸门按 `lastMineruHttpWhy` 动态推原因（不再固定列四类）；`doc_formulas` 先校验 pptx 能不能打开，坏了直接说坏了 |
+| 0.3.14 | ⑤文档 | 新增「档位、模式与阈值」整节；改 6 处过期描述（渲染 2.5 倍、`doc_ocr` 工具名、指纹行、`CACHE_SCHEMA`、`main.js` 行数、`main.js:361` 行号引用） |
+
+**已知未修（都在代码注释或本节写明，不是漏记）**：
+
+- 页缓存键不含 `tier`、缓存命中绕过自动分档 —— 图页要升级得带 `force:true`；
+- `MINERU_AUTO_TIER=0` 只有环境变量入口，工具面没有对应参数；
+- `doc_parse` 不受 `mineru-mode.txt` 约束（它走的是另一条在线通道，只在上传前有提示）；
+- `doc_ocr` 文字层拼接会丢页间空格（BT-OCR-06）；
+- `prefetch_book.mjs` 是手动脚本，插件内没有入口，直接跑会因缺参崩；
+- `loadPdf` 的 6 处不 `destroy`（2026-11-22 审计遗留，要重构 6 个工具的执行结构）。
+
+**验证**：每次改动都跑 `ELECTRON_RUN_AS_NODE=1 <Harness.exe> --check <file>`（exit 0、stderr 空）；0.3.11 之后在真实 `doc_ocr` 上验过 p193（227 字表格）与 p222（330 字三表 + figure 块）——这两页在 `standard` 下是空 `chart` 块，能出字说明 advanced 补跑在插件路径上真的生效了，且 `p193.json` 的 `tier` 字段为 `advanced`。
