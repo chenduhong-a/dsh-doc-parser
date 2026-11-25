@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-MINERU_VENV = os.environ.get("MINERU_VENV", r"C:\deepseek\tools\mineru3-test\venv")
+MINERU_VENV = os.environ.get("MINERU_VENV", r"C:\deepseek\tools\mineru4-venv")
 MINERU_EXE = os.path.join(MINERU_VENV, "Scripts", "mineru.exe")
 
 

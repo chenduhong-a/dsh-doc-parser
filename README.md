@@ -11,7 +11,7 @@
 | `doc_info` | 页数、每页尺寸、文本密度/图片数、扫描页判定、元数据、目录/书签；`cacheAction=stats\|clear\|prune` 管缓存 |
 | `doc_text` | 按页提取文本；`pages="1-3,5"` 分块；`withPosition` 附行坐标与字号 |
 | `doc_render` | 渲染页面为 PNG（默认 scale 2.5），返回本地路径；单次上限 50 页，超出会明确提示 |
-| `doc_ocr` | 对扫描页 OCR：**文本层优先**（有文字层直接读，0.3 秒）；**默认且唯一 MinerU 3.4.5**（公式→LaTeX、表格→HTML、图片裁切，走 GPU，首次加载约 60 秒）；`engine` 只有 `mineru` 一个合法值（Indra 兜底已于 2026-11-18 移除，失败直接报错）；默认只处理判定为扫描的页，`force=true` 强制；`prefetch=true` 后台整本预跑，`exportImages=true` 把图统一导出到 `figures/` |
+| `doc_ocr` | 对扫描页 OCR：**文本层优先**（有文字层直接读，0.3 秒）；**默认且唯一 MinerU 4.2.3**（公式→LaTeX、表格→HTML、图片裁切，走 GPU，首次加载约 80 秒）；`engine` 只有 `mineru` 一个合法值（Indra 兜底已于 2026-11-18 移除，失败直接报错）；默认只处理判定为扫描的页，`force=true` 强制；`prefetch=true` 后台整本预跑，`exportImages=true` 把图统一导出到 `figures/` |
 | `doc_tables` | 坐标启发式表格 → TSV（`engine=mineru` 时可出真 HTML 表格）；列数不一致时标注低置信度；相邻页首行相同会标注「续表」；`maxMineruPages`（默认 24）限制一次调用最多让多少页进 MinerU |
 
 | `doc_parse` | 通用文档解析：pdf / doc / docx / ppt / pptx / 图片 / html 交给 mineru.net，返回 markdown（公式 LaTeX、表格 HTML）；**文件会上传**，需要 token；按文件内容缓存，重复调用 0 成本 |
@@ -35,21 +35,24 @@ hash-index.json               # 路径+大小+mtime → sha256 的索引（大�
 - 用 `node:fs` 直接读绝对路径（0.2.1 内核的 `ctx.fs` 不支持 `readBytes`）。
 - pdfjs-dist 用 `legacy/build/pdf.mjs`，cmaps / standard_fonts 从包内解析。
 - 文本提取沿用 `_pdftest/dump.mjs` 的行/空格启发式。
-- OCR 只有一条路：**MinerU 3.4.5**（pipeline 后端，公式→LaTeX、表格→HTML、图落成真实文件，走 GPU）。MinerU 用独立 venv（默认 `C:\deepseek\tools\mineru3-test\venv`，可用 `MINERU_VENV` 覆盖）；插件自带的 `ocr-venv` 与 **Indra 备用通道已于 2026-11-18 移除**（用户拍板，用不上），MinerU 失败现在直接报错、不再静默降级成纯文本。
+- OCR 只有一条路：**MinerU 4.2.3**（公式→LaTeX、表格→HTML、图落成真实文件，走 GPU）。MinerU 用独立 venv（默认 `C:\deepseek\tools\mineru4-venv`，可用 `MINERU_VENV` 覆盖）；插件自带的 `ocr-venv` 与 **Indra 备用通道已于 2026-11-18 移除**（用户拍板，用不上），MinerU 失败现在直接报错、不再静默降级成纯文本。
+- **4.x 起是两个常驻进程**：`mineru-api.exe`（18000，只有异步 `/v1/tasks`）与 `mineru-kit file-parse-server --api-url http://127.0.0.1:18000`（18001，提供同步 `/v1/file_parse`）。插件 `startMineruApi()` 首次调用时把两个都拉起来并等端口；`MINERU_FP_PORT` 可改第二个端口。`MINERU_TELEMETRY_DISABLED=1` 已在 spawn 环境里写死（4.x 默认开遥测）。
 - **实测（2026-11-09，`kittel_20p.pdf` 前 3 页）**：
   - **文本层优先**：pdfjs 取到 ≥40 字直接返回（`engine=text`，100%），0.38 秒；
-  - **MinerU 3.4.5**（默认）：3 页 77 秒（含首次模型加载，之后很快——OCR 138 块仅 0.75 秒），content_list 50 项（text 33 / equation 8 / image 2 / chart 1 / page_number 3 / header 3），**8 个公式块全部 LaTeX**（含 `\frac`、`\int`、`\hbar`、`\tag{73}`），行内公式同样是 LaTeX，图片落成 jpg 并带真实路径，中文准确；
+  - **MinerU 3.4.5**（历史记录，2026-11-25 已换 4.2.3）：3 页 77 秒（含首次模型加载，之后很快——OCR 138 块仅 0.75 秒），content_list 50 项（text 33 / equation 8 / image 2 / chart 1 / page_number 3 / header 3），**8 个公式块全部 LaTeX**（含 `\frac`、`\int`、`\hbar`、`\tag{73}`），行内公式同样是 LaTeX，图片落成 jpg 并带真实路径，中文准确；
+  - **MinerU 4.2.3**（当前，2026-11-25 实测同一份 49 页物理论文）：`tier=basic` 首轮 **82.6 秒**（含载模型）、3 页热态 **2.6–3.9 秒**；返回 zip 里 `structured_content.json` 按页分组 49 页 / 336 块（text 164 / equation 90 / page_number 46 / paragraph_title 36），**公式块的 `content` 就是 LaTeX**，图片是 `images/page_<n>_equation_<k>.jpg`（91 张，不再是 base64 data URI）；注意 block 字段统一成 `content` + `image_source`，3.x 的 `text`/`latex`/`table_body`/`img_path` 都没了；
   - ~~Indra~~ 已于 2026-11-18 移除（见文末第十四轮）；旧缓存里 `engine=indra` 的记录仍可读，但不再产生新记录；
   - **RapidOCR 已于 2026-10-24 移除**（用户拍板）；`engine` 参数现在只剩 `mineru` 一个合法值。
 - OCR 结果按页缓存在 `<data>\<hash>\ocr\pNNN.json`（含 `engine` 字段；切换引擎会重识别），跨会话共享（`$DSH_HOME\storages\pdf-reader`），命中即跳过识别。
 - 渲染比例固定 1.5 倍：与 2.5 倍精度持平（封面 99.2 vs 99.1），速度快约 3 倍。
-- MinerU 的 venv 另装，3.4.5 起不需要手工补依赖（自带 torch 2.7.1+cu128 / mineru-vl-utils / opencv）：
+- MinerU 的 venv 另装（4.x 基础版不带 torch，走 `onnxruntime-directml`，GPU 直接可用）：
 
 ```sh
-pip install mineru==3.4.5
+pip install "mineru>=4.0,<5"
+mineru-models-download --tier basic --small-backend onnx --source modelscope
 ```
 
-  升级前的包清单备份在 `C:\deepseek\tools\mineru3-test\freeze-before-345.txt`。
+  4.x 的模型不再落 `.cache\modelscope`，改放 `C:\Users\<用户>\.mineru`（basic 档 13 文件 / 839.3 MB）。旧 venv（`C:\deepseek\tools\mineru3-test\venv`，6.6 GB）与旧模型（`.cache\modelscope` 下 1180.2 MB）已不再被代码引用；3.4.5 的包清单备份在 `C:\deepseek\tools\mineru3-test\freeze-before-345.txt` 与 `C:\deepseek\work\handover\mineru-3.4.5-freeze.txt`。
 - **注意（2026-11-09 已修正的旧结论）**：`onnxruntime 1.31` 曾在本机 Python 3.12 上 `0xC0000005` 崩溃——根因是**系统 VC 运行时被旧程序覆盖**（`System32\vcruntime140.dll`、`msvcp140.dll` 停在 14.00.24215.1，而 redist 装的是 14.51.36247），用 Package Cache 里的原包跑 `VC_redist.x64.exe /repair /quiet /norestart` 修好后，1.31 已可正常 import。这条只对已移除的 Indra 通道有意义，留作历史记录。
 - 工具用原生对象 + `ctx.tools.register`，不依赖 `@deepseek-ai/dsh-tools`。
 - **扫描件渲染回退**：pdfjs 缺 CCITT/JBIG2 解码器，会把这类页面渲染成纯白图；`pdf_render_page` 渲染后检测纯白（非白像素 <0.1%），自动改用 **PDFium（`pypdfium2`）** 重渲（`lib/render_pdfium.py`），`pdf_ocr_page` 复用同一结果。兜底解释器现在只用 MinerU 的 venv（它自带 `pypdfium2`），插件不再自带 venv。
