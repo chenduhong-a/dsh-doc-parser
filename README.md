@@ -2,7 +2,7 @@
 
 > **改名说明（2026-11-13）**：本包从 `dsh-pdf-enhanced` 重写而来，P1 阶段先把 PDF 六个工具搬过来并把工具名统一成 `doc_*`；下文历史章节里出现的 `pdf_info` / `pdf_extract_text` / `pdf_render_page` / `pdf_ocr_page` / `pdf_tables` 分别对应现在的 `doc_info` / `doc_text` / `doc_render` / `doc_ocr` / `doc_tables`。Office 与公式通道在 P2、P3 接入。
 > 
-> DeepSeek Harness 的 PDF / 文档处理工具插件。host 半提供工具与进度接口，client 半在侧栏显示 OCR 进度；本地处理为主，但 `doc_parse` 与 `MINERU_MODE=online` 会把文件上传到 mineru.net。
+> DeepSeek Harness 的 PDF / 文档处理工具插件。host 半提供工具与进度接口，client 半在侧栏显示 OCR 进度；本地处理为主，但 `doc_parse` 与「在线模式」（插件根目录 `mineru-mode.txt` 写 `online`，或环境变量 `MINERU_MODE=online`）会把文件上传到 mineru.net。
 
 ## 工具
 
@@ -129,11 +129,12 @@ mineru-models-download --tier basic --small-backend onnx --source modelscope
 
 本地 MinerU 要占 GPU、还得维护那套 venv；官方在线 API（mineru.net）是另一条路：PDF 传上去、云端解析、结果打包回来。2026-11-13 接上，新增 `lib/mineru-online.js`。
 
-**怎么开**（环境变量，改完要重启宿主）：
+**怎么开**（两个来源，文件优先）：
 
-- `MINERU_MODE=online` 强制在线；
-- `MINERU_MODE=local` 强制本地；
-- 不设时：本地 venv 在就走本地，不在且有 token 就走在线。
+- 插件根目录的 `mineru-mode.txt` 写 `local` 或 `online`（一行）。**每次调用重读，改完下一次 `doc_ocr` 即生效，不用重启宿主。**
+- 没有那个文件时看 `MINERU_MODE` 环境变量：`online` 强制在线、`local` 强制本地、不设则本地 venv 在就走本地、不在且有 token 才走在线。
+
+2026-11-25 加文件这一层，是因为 Windows 改用户级环境变量只写注册表、**不刷新已运行的 explorer**，宿主重启后继承的仍是旧快照——当天 23:15 把 `MINERU_MODE` 改成 `local`、23:19 重启宿主，进程里读到的还是 `online`，差一步又把 PDF 传了上去。
 
 **token**：单行写进 `C:\deepseek\tools\.mineru-token`，或设 `MINERU_API_TOKEN`。别贴聊天、别写进命令行。
 
@@ -279,7 +280,7 @@ dsh plugin --profile desktop remove dsh-doc-parser
 - **`slice(0, 4000)` 静默截断**（`lib/main.js` 与 `lib/mineru-online.js`）→ `doc_tables` 长表从标签中间断开、行列丢失且写回缓存。现在整段保留。
 - **文本层页假置信度**：纯文本页写 `confidence: 100`，页头显示 `(ocr 100%)`，与「MinerU 不返回置信度」的注释矛盾。现在记 `null`，页头显示 `(ocr text)`。
 - **`doc_tables` 超时**：默认最多 24 页送 MinerU，冷启动 40 s + 每页 1.2–7 s 必超 120 s；改成 600000，与 `doc_ocr` 一致。
-- **`MINERU_MODE` 两条静默路径**：显式 `online` 但无 token 会静默走本地；未设 mode、本地 venv 缺失而有 token 会**静默把整份 PDF 上传**。现在两条都打显式提示，`doc_ocr` 描述也写明「设 `MINERU_MODE=local` 可禁止上传」。
+- **`MINERU_MODE` 两条静默路径**：显式 `online` 但无 token 会静默走本地；未设 mode、本地 venv 缺失而有 token 会**静默把整份 PDF 上传**。现在两条都打显式提示，`doc_ocr` 描述也写明「设 `MINERU_MODE=local` 可禁止上传」。（2026-11-25 起模式优先取插件根目录的 `mineru-mode.txt`，环境变量降为兜底——原因见第七轮那节。）
 - **本轮另修的中低 30 处**（同批审计，已落盘并验证）：OOXML/TSV 侧 —— xlsx 自闭合单元格 `<c r="A1" s="1"/>` 不再丢格与错列、稀疏数组铺平（`formats/ooxml.js`）、空行保留且裁尾部空行、`sharedStrings` 去掉二次 `decodeXml`、`rowsToTsv` 把单元格内 `\t\n` 压成空格（`tables.js`）、`ooxmlTables` 支持 `pages` 按 sheet 过滤；工具面 —— `doc_parse` 的 20000 改吃 `PDF_MAX_CHARS`、输出头带 `[batch <id> @ <时间>]`、`force` 描述改实话（OCR 阶段不读页缓存）、`/\.pptx?$/` 收紧成 `\.pptx$`、`doc_tables` 增加 `maxRows` 并透传 `pages`、`engine=mineru` 时跳过文本层启发式、`doc_info` 的 `probeLimit` 夹到 2000、删死代码 `apiProbeCache`；语言与缓存 —— `DEFAULT_LANG` 常量统一三处写死值、`cache.js` 命中时加首尾 4 KB 指纹校验（同 size+mtime 的内容替换不再复用旧 hash）；超时与产物 —— 三处 `spawnSync` 补 `timeout`（`main.js` 30 s / `pdf-core.js` 60 s / `mineru-online.js` 120 s，`main.js:361` 的本地 MinerU CLI 原本就有 1800000）、渲染 PNG 名带 scale（`p003@2.5x.png`）。
 - **仍未修的一项**：`loadPdf` 的 6 处不 `destroy`（pdfjs 不释放 worker）。要重构 6 个工具的执行结构才能加 `finally`，而 `prepare()` 返回的 abs 是否内容不可变尚未确认（复用缓存可能拿到陈旧 doc），风险高于收益——留给专门一轮做。完整清单见 `C:\deepseek\work\_audit\docparser-bugs.md`。
 
