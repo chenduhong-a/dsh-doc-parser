@@ -1,10 +1,10 @@
-"""OCR/parse pages with MinerU 3.x (pipeline backend, ONNX+PaddleOCR+UniMERNet).
+"""OCR/parse pages with MinerU 3.x CLI (pipeline backend, ONNX+PaddleOCR+UniMERNet).
 
 Usage: python ocr_mineru.py <pdf> <pages_csv> <out_json> [lang]
   pages_csv: "171,172,180" 或 "171-180"
 Output: {"pages": {"171": {"text": "...", "type": "mineru"}}, "elapsed": 61.2}
 
-Requires the mineru venv (default C:\\deepseek\\tools\\mineru3-test\\venv, override MINERU_VENV).
+Requires the mineru venv (default C:\\deepseek\\tools\\mineru4-venv, override MINERU_VENV).
 """
 import json
 import os
